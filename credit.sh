@@ -9,6 +9,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 if [[ "${1:-}" == "-json" ]]; then
-    exec ./credit
+    exec ./wb2api-credit
 fi
-exec ./credit -pretty
+exec ./wb2api-credit -pretty

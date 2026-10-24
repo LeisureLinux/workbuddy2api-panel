@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 
-BIN=./signin_bin
+BIN=./wb2api-signin
 if [ ! -x "$BIN" ]; then
     echo "build signin_bin ..."
     go build -o "$BIN" ./cmd/signin

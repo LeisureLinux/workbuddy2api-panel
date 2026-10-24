@@ -18,7 +18,7 @@ CONTAINER="workbuddy2api"
 mkdir -p "$AUTH_DIR"
 
 # login 工具：不存在才编译（源码改动后手动 go build -o login ./cmd/login）
-LOGIN_BIN="./login"
+LOGIN_BIN="./wb2api-login"
 if [[ ! -x "$LOGIN_BIN" ]]; then
     go build -o "$LOGIN_BIN" ./cmd/login
 fi
