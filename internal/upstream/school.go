@@ -120,7 +120,9 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 
 // SchoolChatTimesEvents 构造一条 chat_request_send 事件（chat_3_times 计数）。
 func SchoolChatTimesEvents(conversationID string) map[string]any {
-	rid := "wb2api-" + clientToken()
+	// traceId / rootRequestId 用官方形态（v4 UUID）。旧值是 `wb2api-<uuid>`——
+	// 项目缩写直接进上报体（issue #239）：能被一眼识别的自证标识。
+	rid := clientToken()
 	return map[string]any{
 		"eventCode":   "chat_request_send",
 		"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
@@ -205,7 +207,9 @@ func MiniPlaybookEvents(caseID, caseName string) []map[string]any {
 	send := map[string]any{
 		"eventCode": "playbook_prompt_send", "source": "discover",
 		"promptLength": 96, "isOfficial": 1,
-		"conversationId": "wb2api-mp-pb-" + clientToken(),
+		// conversationId 用官方形态（v4 UUID）。旧值是 `wb2api-mp-pb-<uuid>`——
+		// 项目缩写直接进上报体（issue #239）。
+		"conversationId": clientToken(),
 		"extVersion":     "2.2.8",
 	}
 	for k, v := range base {
