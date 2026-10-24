@@ -106,8 +106,15 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          name: workbuddy2api-panel-amd64
           path: artifacts
-          merge-multiple: true
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: workbuddy2api-panel-arm64
+          path: artifacts
+      - name: List downloaded files
+        run: find artifacts -type f -maxdepth 3 -print
 
       - name: Create release
         env:
