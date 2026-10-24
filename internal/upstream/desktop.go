@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	desktopReportPath   = "/v2/report"
+	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
 	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
 	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
@@ -73,7 +73,7 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"ideVersion":   "5.5.6",
 		"machineId":    deriveID(a, "machine"),
 		"sessionId":    deriveID(a, "session"),
-		"extName":     "workbuddy-desktop",
+		"extName":      "workbuddy-desktop",
 		"extVersion":   "5.5.6",
 		"os":           "win32",
 		"arch":         "x64",
@@ -112,7 +112,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("User-Agent", desktopUA)
@@ -157,7 +157,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"isContextTruncated": false, "currentStepCount": 1,
 			"traceId": uuid(), "rootRequestId": requestID,
 			"parentConversationId": conversationID,
-			"agentName": "cli", "agentType": "main",
+			"agentName":            "cli", "agentType": "main",
 		}),
 		mk("chat_request_send", map[string]any{
 			"inputLength": 24, "isPlan": false, "isAutoExecuteTerminal": false,
@@ -168,8 +168,8 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
 			"traceId": uuid(), "rootRequestId": requestID,
 			"parentConversationId": conversationID,
-			"agentName": "cli", "agentType": "main",
-			"codebuddy.session_id":             conversationID,
+			"agentName":            "cli", "agentType": "main",
+			"codebuddy.session_id":              conversationID,
 			"codebuddy.conversation_request_id": requestID,
 		}),
 		mk("chat_message_response", map[string]any{
@@ -179,16 +179,16 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
 			"firstTokenAt": time.Now().UnixMilli(), "traceId": uuid(),
 			"conversationId": conversationID,
-			"rootRequestId": requestID, "parentConversationId": conversationID,
+			"rootRequestId":  requestID, "parentConversationId": conversationID,
 			"agentName": "cli", "agentType": "main",
-			"codebuddy.session_id":             conversationID,
+			"codebuddy.session_id":              conversationID,
 			"codebuddy.conversation_request_id": requestID,
 		}),
 		mk("chat_message_status", map[string]any{
 			"messageId": messageID + "-assistant", "messageErrorCode": "0",
 			"traceId": uuid(), "rootRequestId": requestID,
 			"parentConversationId": conversationID,
-			"agentName": "cli", "agentType": "main",
+			"agentName":            "cli", "agentType": "main",
 		}),
 		mk("chat_request_response", map[string]any{
 			"mode": "craft", "toolCallCount": 0,
@@ -213,7 +213,7 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("User-Agent", desktopUA)
@@ -276,15 +276,15 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.WebBaseCN+"/v2/report", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.webBase(a)+"/v2/report", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", c.WebBaseCN)
+	req.Header.Set("Origin", c.webBase(a))
 	req.Header.Set("Referer", pageURL)
 	req.Header.Set("User-Agent", ua)
 	if a.UID != "" {
@@ -391,7 +391,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", desktopUA)
 	req.Header.Set("X-Domain", c.chatBase(a))
@@ -438,7 +438,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		return "", "", err
 	}
 	h := req.Header
-	h.Set("Authorization", "Bearer "+a.AccessToken)
+	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
 	h.Set("User-Agent", desktopUA)
@@ -477,6 +477,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	// 从 SSE 流抓第一个 data.id 作为服务端 requestId（读干流避免残留连接）。
 	buf := make([]byte, 0, 1<<20)
 	tmp := make([]byte, 8192)
+	searchFrom := 0
 	for {
 		n, rerr := resp.Body.Read(tmp)
 		if n > 0 {
@@ -488,8 +489,12 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 				}
 				fmt.Printf("[dbg-rd %d] %q\n", n, dbg)
 			}
-			if i := bytes.Index(buf, []byte(`"id":"`)); i >= 0 {
-				rest := buf[i+6:]
+			// 从上次搜索位置继续：SSE 里 `"id":"` 可能先出现在消息 id 等字段，
+			// 若不推进偏移，首个不匹配的 id 会让循环永远重复命中同一位置，
+			// 读满 1MB 后误报"未找到 requestId"。
+			if i := bytes.Index(buf[searchFrom:], []byte(`"id":"`)); i >= 0 {
+				abs := searchFrom + i
+				rest := buf[abs+6:]
 				if end := bytes.IndexByte(rest, '"'); end > 0 {
 					id := string(rest[:end])
 					if os.Getenv("WB2A_DEBUG_CHAT") != "" {
@@ -498,6 +503,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 					if idRegex.MatchString(id) {
 						return conversationID, id, nil
 					}
+					searchFrom = abs + 1
 				}
 			}
 		}
@@ -512,7 +518,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 var idRegex = regexp.MustCompile(`^(cmb-)?[0-9a-f]{32}$`)
 
 // DesktopExpertSummonSequence 构造「召唤平台专家」事件组（expert_summon_click 等），
-// 载荷对齐真实抓包样本（Sunny row 2644）。需配合 DesktopChatWithExpert + 
+// 载荷对齐真实抓包样本（Sunny row 2644）。需配合 DesktopChatWithExpert +
 // DesktopExpertActualUseEvent 完成一次完整「召唤+使用」。
 func DesktopExpertSummonSequence(e MarketExpert) []DesktopEvent {
 	cat := "expert-all"
@@ -573,7 +579,7 @@ func desktopExpertActualUse(e MarketExpert, conversationID, requestID string) De
 	}
 	return DesktopEvent{
 		"eventCode": "expert_actual_use",
-		"id": e.ExpertID, "name": e.DisplayNameZH, "expertTitle": e.ProfessionZH,
+		"id":        e.ExpertID, "name": e.DisplayNameZH, "expertTitle": e.ProfessionZH,
 		"type": cat, "expertType": e.ExpertType, "source": "builtin", "version": ver,
 		"cost": 9000, "characterCount": 14,
 		"conversationId": conversationID, "requestId": requestID, "messageId": "msg-" + requestID[len(requestID)-8:],

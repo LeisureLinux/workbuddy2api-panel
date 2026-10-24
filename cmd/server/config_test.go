@@ -22,6 +22,67 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestPanelPackageDetailLimit(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Panel.PackageDetailLimit != 5 {
+		t.Fatalf("default package_detail_limit=%d want 5", c.Panel.PackageDetailLimit)
+	}
+
+	configured, err := ParseConfig([]byte(`{"panel":{"package_detail_limit":8}}`))
+	if err != nil {
+		t.Fatalf("parse configured limit: %v", err)
+	}
+	if configured.Panel.PackageDetailLimit != 8 {
+		t.Fatalf("configured package_detail_limit=%d want 8", configured.Panel.PackageDetailLimit)
+	}
+
+	fallback, err := ParseConfig([]byte(`{"panel":{"package_detail_limit":0}}`))
+	if err != nil {
+		t.Fatalf("parse fallback limit: %v", err)
+	}
+	if fallback.Panel.PackageDetailLimit != 5 {
+		t.Fatalf("fallback package_detail_limit=%d want 5", fallback.Panel.PackageDetailLimit)
+	}
+}
+
+func TestLoggingDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Logging.RequestArchiveEnabled || c.Logging.RequestRetentionDays != 7 || c.Logging.RequestArchiveMaxMB != 100 {
+		t.Fatalf("logging defaults = %+v", c.Logging)
+	}
+	// 来源记录（IP/UA）缺省开启：键缺席时必须保持 true，只有显式 false 才关闭。
+	if !c.Logging.RequestClientInfo {
+		t.Fatalf("request_client_info default = false, want true: %+v", c.Logging)
+	}
+	configured, err := ParseConfig([]byte(`{"logging":{"request_archive_enabled":false,"request_retention_days":30,"request_archive_max_mb":500}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.Logging.RequestArchiveEnabled || configured.Logging.RequestRetentionDays != 30 || configured.Logging.RequestArchiveMaxMB != 500 {
+		t.Fatalf("configured logging = %+v", configured.Logging)
+	}
+	off, err := ParseConfig([]byte(`{"logging":{"request_client_info":false}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Logging.RequestClientInfo {
+		t.Fatalf("explicit false ignored: %+v", off.Logging)
+	}
+	fallback, err := ParseConfig([]byte(`{"logging":{"request_retention_days":0,"request_archive_max_mb":0}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallback.Logging.RequestRetentionDays != 7 || fallback.Logging.RequestArchiveMaxMB != 100 {
+		t.Fatalf("logging fallback = %+v", fallback.Logging)
+	}
+}
+
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -90,6 +151,9 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 	if c.Pool.IdleWeightPerHour != 0.5 || c.Pool.IdleWeightMax != 5.0 {
 		t.Errorf("idle weights=%v/%v", c.Pool.IdleWeightPerHour, c.Pool.IdleWeightMax)
 	}
+	if !c.Pool.PreferExpiring || c.ExpiringSoonDur != 7*24*time.Hour {
+		t.Errorf("expiring defaults: enabled=%v window=%v", c.Pool.PreferExpiring, c.ExpiringSoonDur)
+	}
 	if c.SoftRateMaxDur.Hours() != 2 {
 		t.Errorf("soft_rate_max=%v want 2h", c.SoftRateMaxDur)
 	}
@@ -115,7 +179,9 @@ func TestPoolConfigParsedFromFile(t *testing.T) {
 			"breaker_cooldown":"10m",
 			"breaker_cooldown_max":"2h",
 			"idle_weight_per_hour":0.7,
-			"idle_weight_max":8.0
+			"idle_weight_max":8.0,
+			"prefer_expiring":false,
+			"expiring_soon":"72h"
 		},
 		"session_sticky":{"enabled":false,"ttl":"1h","gc_interval":"2m"}
 	}`), 0o600)
@@ -134,6 +200,9 @@ func TestPoolConfigParsedFromFile(t *testing.T) {
 	}
 	if c.Pool.IdleWeightPerHour != 0.7 || c.Pool.IdleWeightMax != 8.0 {
 		t.Errorf("idle weights=%v/%v", c.Pool.IdleWeightPerHour, c.Pool.IdleWeightMax)
+	}
+	if c.Pool.PreferExpiring || c.ExpiringSoonDur != 72*time.Hour {
+		t.Errorf("expiring override: enabled=%v window=%v", c.Pool.PreferExpiring, c.ExpiringSoonDur)
 	}
 	if c.SessionSticky.Enabled {
 		t.Error("session_sticky.enabled want false from file")
@@ -156,6 +225,32 @@ func TestSoftRateMaxParsedFromFile(t *testing.T) {
 	}
 	if c.SoftRateMaxDur.Minutes() != 45 {
 		t.Errorf("soft_rate_max=%v want 45m", c.SoftRateMaxDur)
+	}
+}
+
+func TestLegacyConfigKeepsPreferExpiringEnabled(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"idle_weight_max":3}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Pool.PreferExpiring {
+		t.Fatal("missing prefer_expiring must preserve default true")
+	}
+}
+
+func TestNegativeExpiringSoonClampsToDisabled(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"expiring_soon":"-1h"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ExpiringSoonDur != 0 || c.Pool.ExpiringSoon != "0" {
+		t.Fatalf("negative window=%v/%q want 0/0", c.ExpiringSoonDur, c.Pool.ExpiringSoon)
 	}
 }
 
@@ -568,75 +663,17 @@ func TestBalanceRefreshDefaults(t *testing.T) {
 	}
 }
 
-// TestMaxBodyDefault 默认 max_body_mb=8。
-func TestMaxBodyDefault(t *testing.T) {
-	c := Default()
-	if err := c.normalize(); err != nil {
-		t.Fatalf("normalize: %v", err)
-	}
-	if c.Server.MaxBodyMB != 8 {
-		t.Errorf("max_body_mb=%d want 8", c.Server.MaxBodyMB)
-	}
-}
-
-// TestMaxBodyExplicit 显式设置 max_body_mb。
-func TestMaxBodyExplicit(t *testing.T) {
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"server":{"max_body_mb":16}}`), 0o600)
-	c, err := Load(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Server.MaxBodyMB != 16 {
-		t.Errorf("max_body_mb=%d want 16", c.Server.MaxBodyMB)
-	}
-}
-
-// TestMaxBodyInvalid 非法值（0/负数）normalize 报错：0 想表达"不限"会被静默当成 8MB，
-// 与其误导不如 fail fast 提示显式配大上限。
-func TestMaxBodyInvalid(t *testing.T) {
-	for _, v := range []string{"0", "-1"} {
-		dir := t.TempDir()
-		fp := filepath.Join(dir, "c.json")
-		os.WriteFile(fp, []byte(`{"server":{"max_body_mb":`+v+`}}`), 0o600)
-		_, err := Load(fp)
-		if err == nil {
-			t.Fatalf("want error for max_body_mb=%s", v)
-		}
-		if !strings.Contains(err.Error(), "server.max_body_mb") {
-			t.Errorf("error should name config key server.max_body_mb: %v", err)
-		}
-	}
-}
-
-// TestMaxBodyEnvOverride env WB2A_MAX_BODY_MB 非空覆盖 JSON 值。
-func TestMaxBodyEnvOverride(t *testing.T) {
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"server":{"max_body_mb":4}}`), 0o600)
-	t.Setenv("WB2A_MAX_BODY_MB", "12")
-	c, err := Load(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Server.MaxBodyMB != 12 {
-		t.Errorf("max_body_mb=%d want env 12", c.Server.MaxBodyMB)
-	}
-}
-
-// TestPromptDefaultCustom 默认 prompt.mode=custom 且 PromptText 为内置默认（非空）。
-func TestPromptDefaultCustom(t *testing.T) {
+// TestPromptDefaultPassthrough 默认 prompt.mode=passthrough（对齐上游：透传客户端
+// 原始 system 是更保守的缺省）；custom 由用户显式选择，此时 PromptText 为内置默认（非空）。
+func TestPromptDefaultPassthrough(t *testing.T) {
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "custom" {
-		t.Errorf("prompt.mode=%q want custom", c.Prompt.Mode)
+	if c.Prompt.Mode != "passthrough" {
+		t.Errorf("prompt.mode=%q want passthrough", c.Prompt.Mode)
 	}
-	if c.PromptText == "" {
-		t.Error("PromptText should be non-empty (built-in default)")
-	}
+	// passthrough 不加载提示词文本（透传客户端 system）；切 custom 时 normalize 会加载。
 }
 
 // TestPromptExplicitPassthrough passthrough 模式不加载文本（透传客户端原始 system）。
@@ -710,7 +747,7 @@ func TestPromptEnvOverride(t *testing.T) {
 	}
 }
 
-// TestPromptLegacyConfigNoImpact 旧 config（无 prompt 段）零影响：mode 仍 custom。
+// TestPromptLegacyConfigNoImpact 旧 config（无 prompt 段）零影响：mode 缺省 passthrough。
 func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -719,8 +756,8 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "custom" {
-		t.Errorf("legacy config should default to custom, got %q", c.Prompt.Mode)
+	if c.Prompt.Mode != "passthrough" {
+		t.Errorf("legacy config should default to passthrough, got %q", c.Prompt.Mode)
 	}
 	if c.Listen != ":9999" {
 		t.Errorf("listen=%q", c.Listen)
@@ -775,5 +812,50 @@ func TestLoadConfigPathIsDirectory(t *testing.T) {
 	}
 	if !strings.Contains(msg, "config.example.json") {
 		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
+	}
+}
+
+// TestServerReadTimeout 入站读取上限（issue #100）：空值回落默认 300s；
+// "0" = 显式不限制（0 是合法值不回落）；负值 fail fast（静默钳 0 会把保护悄悄关掉）。
+func TestServerReadTimeout(t *testing.T) {
+	c := Default()
+	if c.Server.ReadTimeout != "300s" {
+		t.Errorf("default read_timeout=%q want 300s", c.Server.ReadTimeout)
+	}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.ServerReadTimeoutDur != 300*time.Second {
+		t.Errorf("default dur=%v want 300s", c.ServerReadTimeoutDur)
+	}
+
+	c = Default()
+	c.Server.ReadTimeout = "" // 显式清空 = 未配置 → 回落默认
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize empty: %v", err)
+	}
+	if c.ServerReadTimeoutDur != 300*time.Second {
+		t.Errorf("empty dur=%v want 300s", c.ServerReadTimeoutDur)
+	}
+
+	c = Default()
+	c.Server.ReadTimeout = "0" // 显式 0 = 不限制（http.Server ReadTimeout 0 即无超时）
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize zero: %v", err)
+	}
+	if c.ServerReadTimeoutDur != 0 {
+		t.Errorf("zero dur=%v want 0", c.ServerReadTimeoutDur)
+	}
+
+	c = Default()
+	c.Server.ReadTimeout = "-5s"
+	if err := c.normalize(); err == nil {
+		t.Error("negative read_timeout should fail fast")
+	}
+
+	c = Default()
+	c.Server.ReadTimeout = "bogus"
+	if err := c.normalize(); err == nil {
+		t.Error("unparsable read_timeout should fail fast")
 	}
 }

@@ -24,23 +24,39 @@ import (
 )
 
 const (
-	upstreamBaseCN    = "https://copilot.tencent.com"
-	clientUA          = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originReferer     = "https://www.codebuddy.cn"
-	endpointAuthState = upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI"
-	endpointLoginAcct = upstreamBaseCN + "/v2/plugin/login/account?state="
-	endpointAuthToken = upstreamBaseCN + "/v2/plugin/auth/token?state="
+	upstreamBaseCN      = "https://copilot.tencent.com"
+	upstreamBaseGlobal  = "https://www.workbuddy.ai"
+	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	originRefererCN     = "https://www.codebuddy.cn"
+	originRefererGlobal = "https://www.workbuddy.ai"
 )
+
+// loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ Origin。
+// realm=="global" → 国际版（workbuddy.ai 同域）；cn/非法/缺省 → CN（零回归）。
+func loginEndpoints(realm string) (state, token, account, origin string) {
+	if realm == "global" {
+		base := upstreamBaseGlobal
+		return base + "/v2/plugin/auth/state?platform=CLI",
+			base + "/v2/plugin/auth/token?state=",
+			base + "/v2/plugin/login/account?state=",
+			originRefererGlobal
+	}
+	base := upstreamBaseCN
+	return base + "/v2/plugin/auth/state?platform=CLI",
+		base + "/v2/plugin/auth/token?state=",
+		base + "/v2/plugin/login/account?state=",
+		originRefererCN
+}
 
 // loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
 var loginHTTP = &http.Client{Timeout: 30 * time.Second}
 
-func commonHeaders(req *http.Request) {
+func commonHeaders(req *http.Request, origin string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", originReferer)
-	req.Header.Set("Referer", originReferer+"/")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", clientUA)
 }
 
@@ -68,13 +84,13 @@ type apiEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// doJSON 发一次 JSON 请求并解信封。
-func doJSON(method, fullURL string, bearer string, body io.Reader) (json.RawMessage, int, error) {
+// doJSON 发一次 JSON 请求并解信封。origin 为 Origin/Referer 基础域（随 realm 切）。
+func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, int, error) {
 	req, err := http.NewRequest(method, fullURL, body)
 	if err != nil {
 		return nil, 0, err
 	}
-	commonHeaders(req)
+	commonHeaders(req, origin)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -97,11 +113,14 @@ func doJSON(method, fullURL string, bearer string, body io.Reader) (json.RawMess
 	return env.Data, resp.StatusCode, nil
 }
 
-
 // beginLogin 发起设备授权并登记 state，返回 (state, authUrl)。
 // loginStart 与 accountRelogin 共用，避免重复实现。
-func (p *Panel) beginLogin() (string, string, error) {
-	data, status, err := doJSON(http.MethodPost, endpointAuthState, "", bytes.NewReader([]byte("{}")))
+func (p *Panel) beginLogin(realm string) (string, string, error) {
+	if realm != "global" {
+		realm = "cn"
+	}
+	epState, _, _, origin := loginEndpoints(realm)
+	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin)
 	if err != nil {
 		return "", "", fmt.Errorf("auth state (upstream %d): %v", status, err)
 	}
@@ -113,25 +132,38 @@ func (p *Panel) beginLogin() (string, string, error) {
 		return "", "", fmt.Errorf("auth state: missing state or authUrl")
 	}
 	p.loginMu.Lock()
-	for s, created := range p.logins {
-		if time.Since(created) > loginTTL {
+	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
+	for s, sess := range p.logins {
+		if time.Since(sess.created) > loginTTL {
 			delete(p.logins, s)
 		}
 	}
-	p.logins[st.State] = time.Now()
+	p.logins[st.State] = loginSession{created: time.Now(), realm: realm}
 	p.loginMu.Unlock()
-	log.Printf("panel: 发起 OAuth 添加账号（state=%s...）", st.State[:min(8, len(st.State))])
+	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
 	return st.State, st.AuthURL, nil
 }
 
 // loginStart 发起设备授权：POST auth/state 拿授权 URL。
+// body 可带 {"realm":"global"}（缺省 cn）；state 会话记 realm，poll 同 realm 落盘。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
-	state, authURL, err := p.beginLogin()
+	realm := "cn"
+	if r.Body != nil {
+		var reqBody struct {
+			Realm string `json:"realm"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&reqBody); err == nil {
+			if reqBody.Realm == "global" {
+				realm = "global"
+			}
+		}
+	}
+	state, authURL, err := p.beginLogin(realm)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": authURL, "state": state})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": authURL, "state": state, "realm": realm})
 }
 
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
@@ -142,15 +174,16 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.loginMu.Lock()
-	_, known := p.logins[state]
+	sess, known := p.logins[state]
 	p.loginMu.Unlock()
 	if !known {
 		writeErr(w, http.StatusNotFound, "unknown or expired state（请重新发起添加账号）")
 		return
 	}
+	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
-	tokRaw, _, err := doJSON(http.MethodGet, endpointAuthToken+state, "", nil)
+	tokRaw, _, err := doJSON(http.MethodGet, epToken+state, "", nil, origin)
 	if err != nil {
 		// pending / 未完成：面板前端继续轮询。
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
@@ -173,7 +206,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	if acctRaw, _, err := doJSON(http.MethodGet, endpointLoginAcct+state, tok.AccessToken, nil); err == nil {
+	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {
@@ -203,6 +236,16 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		Nickname:     acct.Nickname,
 		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
 	}
+	// global 登录：落盘 auth.realm=global（Realm() 按此判域；不写则依赖 domain 后缀回落）。
+	if sess.realm == "global" {
+		if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
+			writeErr(w, http.StatusInternalServerError, "set realm: "+err.Error())
+			return
+		}
+	} else {
+		// CN 也显式补 realm 键（幂等），让 auth 文件形态统一（与 LoadDir 存量迁移对齐）。
+		_, _ = a.BackfillRealm()
+	}
 	if err := a.SaveAtomic(); err != nil {
 		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
 		return
@@ -211,25 +254,57 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
+	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
+	// （D4 门控同 scheduler：CN 任务端点对 global 不发起任何调用）。
 	checkinMsg := ""
-	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-		checkinMsg = err.Error()
-	}
 	remain := int64(-1)
-	if rm, err := p.cfg.Upstream.UserResource(a); err == nil {
-		remain = rm
-		p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
+	total := int64(0)
+	if sess.realm == "global" {
+		// 注册激活（幂等）：region required 时自动补地区（白名单首个，HK）后重新激活。
+		// 失败不阻断登录结果（auth 已落盘），只在返回字段里体现。
+		if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
+			checkinMsg = "注册激活失败: " + err.Error()
+			log.Printf("panel: global 注册激活 uid=%s: %v", acct.UID, err)
+		} else if activated {
+			log.Printf("panel: global 注册激活 uid=%s 完成", acct.UID)
+		}
+		// trial 加油包（幂等 14051 = 已领过，非错误）。
+		if claimed, err := p.cfg.Upstream.ClaimTrial(a); err != nil {
+			checkinMsg = joinMsg(checkinMsg, "trial 领取失败: "+err.Error())
+			log.Printf("panel: global trial uid=%s: %v", acct.UID, err)
+		} else if claimed {
+			log.Printf("panel: global trial uid=%s 已领", acct.UID)
+		}
+	} else if !a.IsEnterprise() {
+		// 企业版跳过签到：上游 POST /v2/billing/meter/daily-checkin 对企业号
+		// 400 code 10001「企业账号不支持该操作」，发了只会把该错误写进登录返回。
+		// 下方 UserResource 余额查询照常（企业额度走 get-enterprise-user-usage 口径）。
+		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			checkinMsg = err.Error()
+		}
+	}
+	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+		remain, total = rm, tt
+		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
 	}
 
 	p.loginMu.Lock()
 	delete(p.logins, state)
 	p.loginMu.Unlock()
-	log.Printf("panel: 新账号已热加载 uid=%s nickname=%q（免重启生效）", acct.UID, acct.Nickname)
+	log.Printf("panel: 新账号已热加载 uid=%s nickname=%q realm=%s（免重启生效）", acct.UID, acct.Nickname, sess.realm)
+	// 企业切换会话预警：该形态下 /v2/report 行为事件被上游静默丢弃（200 不计分），
+	// 成长任务全部无法点亮（签到/列表/额度/领养照常）。当场给出修复路径，
+	// 避免用户事后对着「已上报但进度 0/x」排查（见 auth.IsEnterpriseSession）。
+	if a.IsEnterpriseSession() && !a.IsEnterprise() {
+		log.Printf("panel: WARN uid=%s 的凭证为企业切换会话（token_source=enterprise_switch）：成长任务行为事件会被上游静默丢弃；建议移除该账号，在浏览器退出企业切换（个人身份）后重新登录", acct.UID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"done":            true,
 		"uid":             acct.UID,
 		"nickname":        acct.Nickname,
+		"realm":           sess.realm,
 		"credits":         remain,
+		"credits_total":   total,
 		"checkin_message": checkinMsg,
 	})
 }
@@ -243,7 +318,11 @@ func (p *Panel) accountRelogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	state, authURL, err := p.beginLogin()
+	realm := "cn"
+	if a := p.cfg.Pool.AuthByUID(uid); a != nil {
+		realm = a.Realm()
+	}
+	state, authURL, err := p.beginLogin(realm)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -274,5 +353,38 @@ func (p *Panel) accountRelogin(w http.ResponseWriter, r *http.Request) {
 		"url":      authURL,
 		"notified": notified,
 		"message":  sendErr,
+	})
+}
+
+// joinMsg 拼接 login 完成后的提示消息（多段用「；」连接，空段跳过）。
+func joinMsg(parts ...string) string {
+	out := ""
+	for _, s := range parts {
+		if s == "" {
+			continue
+		}
+		if out != "" {
+			out += "；"
+		}
+		out += s
+	}
+	return out
+}
+
+// loginRegions 返回 global 注册可选地区（panel 前端选地区弹窗用；CN 不调用）。
+// 未持账号时返回白名单静态兜底（前端只读展示，不依赖上游）。
+func (p *Panel) loginRegions(w http.ResponseWriter, r *http.Request) {
+	// 静态白名单（对齐国际版 web 展示集）：面板前端只读展示，无需账号态。
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"regions": []map[string]string{
+			{"code": "HK", "name": "Hong Kong"},
+			{"code": "MO", "name": "Macao"},
+			{"code": "SG", "name": "Singapore"},
+			{"code": "TH", "name": "Thailand"},
+			{"code": "PH", "name": "Philippines"},
+			{"code": "MY", "name": "Malaysia"},
+			{"code": "ID", "name": "Indonesia"},
+		},
 	})
 }

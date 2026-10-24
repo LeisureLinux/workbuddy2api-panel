@@ -9,8 +9,8 @@ package upstream
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -50,7 +50,7 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 			"messages": []map[string]any{{"role": "user", "content": "1+1等于几？直接回答。"}},
 			"stream":   true,
 		})
-		rc, status, respBody, err := c.ChatStream(a, body, "")
+		rc, status, respBody, err := c.ChatStream(a, body, "", ChatMeta{})
 		if err != nil || status >= 400 {
 			if rc != nil {
 				rc.Close()

@@ -22,15 +22,37 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
 const billingBaseCN = "https://www.codebuddy.cn"
 
+// billingBaseGlobal 国际版计费域。global 账号打 CN 域会得到 401：
+// www.codebuddy.cn 不认 workbuddy.ai 的 token（实测 401，workbuddy.ai 同 token 为 code=0）。
+const billingBaseGlobal = "https://www.workbuddy.ai"
+
+// billingBaseFor 按账号 realm 选择计费域。
+//
+// 判定口径与 internal/auth.Realm() 一致：显式 realm=global 或 domain 落在
+// workbuddy.ai 家族，都按国际版处理。cmd/credit 早先对所有账号硬编码 CN 域，
+// 导致 global 账号余额查询恒返回 401（面板显示的是池内缓存值，不是实时的）。
+func billingBaseFor(af *authFile) string {
+	if strings.EqualFold(strings.TrimSpace(af.Auth.Realm), "global") {
+		return billingBaseGlobal
+	}
+	d := strings.ToLower(strings.TrimSpace(af.Auth.Domain))
+	if d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") {
+		return billingBaseGlobal
+	}
+	return billingBaseCN
+}
+
 type authFile struct {
 	Auth struct {
 		AccessToken string `json:"accessToken"`
 		Domain      string `json:"domain"`
+		Realm       string `json:"realm"`
 	} `json:"auth"`
 	Account struct {
 		UID          string `json:"uid"`
@@ -98,7 +120,13 @@ func fetchUserResource(af *authFile) (remain, used, size int64, packs int, err e
 		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	})
-	req, err := http.NewRequest(http.MethodPost, billingBaseCN+"/v2/billing/meter/get-user-resource", bytes.NewReader(body))
+	base := billingBaseFor(af)
+	// global 域无 /v2 前缀（与 internal/upstream 的 billingMeterPaths 同口径）。
+	path := "/v2/billing/meter/get-user-resource"
+	if base == billingBaseGlobal {
+		path = "/billing/meter/get-user-resource"
+	}
+	req, err := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}

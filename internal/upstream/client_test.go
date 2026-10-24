@@ -30,6 +30,17 @@ func TestClassify(t *testing.T) {
 		// 限流文案（issue #28）：状态码不是 429 时也必须识别为软限流，
 		// 否则账号不会被冷却，下次请求仍会被选中。
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, ErrSoftRate},
+		// 11128 与 11140 的 msg 同为 "request illegal"，必须按业务码分流：
+		//   11128 = 通道校验失败（上游认为不是官方客户端发出），账号健康 → 不罚号。
+		//   11140 = 账号被上游限制（异常行为/风控）→ account_fault。
+		// 只看文案会把健康账号误禁用，只按 code 会把 11140 的限流变体误判。
+		{400, `{"code":"11-128","msg":"request illegal","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`, ErrChannelRefused},
+		{403, `{"code":"11-128","msg":"request illegal"}`, ErrChannelRefused},
+		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		{403, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		// 无 code 的裸 "request illegal" 不归属任何账号级判定（宁可走通用 4xx 兜底，
+		// 也不能凭一句文案硬禁用账号）。
+		{400, `{"msg":"request illegal"}`, ErrClient},
 		{400, `rate limit`, ErrSoftRate},
 		{403, `usage limit reached`, ErrSoftRate},
 		// "model usage limit exceeded" 不是余额语义（无 credit/quota/积分/额度 等计费词），
@@ -39,7 +50,7 @@ func TestClassify(t *testing.T) {
 		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
 		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
-		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		{400, `{"code":"11-128","msg":"blocked by security policy"}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
@@ -49,6 +60,15 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		// 图片格式/数据错误是确定性请求错误，分类后不轮转、不罚号。
+		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
+		{400, `{"code":11135,"msg":"invalid_image_data"}`, ErrImageInvalid},
+		{400, `invalid_image_data`, ErrImageInvalid},
+		// 11135 业务码须容忍 JSON 空白（5d5223d：字面量 marker 只覆盖紧凑形态）。
+		{400, `{"code": 11135, "msg":"image data invalid"}`, ErrImageInvalid},
+		{400, `{"error":{"code": "11135", "message":"image invalid"}}`, ErrImageInvalid},
+		// 防过宽：11133（模型不支持图片）不进 image_invalid。
+		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrClient},
 		{200, `quota exceeded`, ErrHardCredit},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
@@ -58,6 +78,65 @@ func TestClassify(t *testing.T) {
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
+		// 11102「该后端无此模型」：确定性答复，归 ErrModelBlocked（(账号,模型) 负缓存避让）。
+		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, ErrModelBlocked},
+		{400, `{"error":{"code":"11102","message":"model service info not found"}}`, ErrModelBlocked},
+		{400, `{"msg":"service info not found"}`, ErrModelBlocked},
+		// 11158 是账号类型级模型权限拒绝：同一模型换有权限的账号仍可能成功，
+		// 按 (账号, 模型) 避让；不能落入 ErrClient 轮转后误报 503。
+		{400, `{"code":11158,"msg":"model [gpt-5.6-sol] is not allowed for user type [personal_free_user]"}`, ErrModelBlocked},
+		{400, `{"error":{"code":"11158","message":"model is not allowed for user type"}}`, ErrModelBlocked},
+		{429, `{"code":11158,"msg":"model is not allowed for user type"}`, ErrSoftRate},
+		// 11102 撞在 requestId 上不算（不得误避让可用模型）。
+		{404, `{"requestId":"11102","msg":"ok"}`, ErrNotFound},
+		// 429 + 11102 → 限流语义（ErrSoftRate），不是模型不存在。
+		{429, `{"code":11102,"msg":"service info not found"}`, ErrSoftRate},
+		// 429 + 余额措辞 → 限流语义（fork-scan-absorb T-3，本次修复点）：限流响应
+		// body 高频携带 "quota exceeded"/"额度不足" 等跨计费/限流两界的措辞，
+		// hardRule 在 429 之前会误判 ErrHardCredit 硬冷却到次日 04:00，白扔号约 12h。
+		// 状态码是比关键词更权威的信号：真余额耗尽走 402，非 429 的 quota 措辞
+		// 仍归 hardRule（上方 {200,"quota exceeded"} 语义不变）。
+		{429, `quota exceeded`, ErrSoftRate},
+		{429, `{"code":1,"msg":"quota exceeded, please wait"}`, ErrSoftRate},
+		{429, `insufficient credits`, ErrSoftRate},
+		{429, `{"code":1,"msg":"额度不足"}`, ErrSoftRate},
+		{429, `积分不足，请充值`, ErrSoftRate},
+		// 429 + 账号级故障码防回归（accountFault 仍先于 429 判定）：429+14017 若
+		// 落到 status==429 兜底会误归 soft_rate，账号级故障等不来自愈。
+		{429, `{"code":14017,"msg":"trial not activated"}`, ErrAccountFault},
+		{429, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, ErrAccountFault},
+		// Issue #175：14018 明确表示账号积分耗尽，即使 HTTP 状态是 429 也必须
+		// 走硬积分冷却；仅有相同文案而无该业务码的普通 429 仍保持软限流。
+		{429, `{"code":14018,"msg":"Credits exhausted"}`, ErrHardCredit},
+		{429, `{"error":{"data":{"code":"14018","msg":"Credits exhausted"}}}`, ErrHardCredit},
+		{429, `{"requestId":"14018","msg":"Credits exhausted"}`, ErrSoftRate},
+		{429, `{"code":1,"msg":"Credits exhausted"}`, ErrSoftRate},
+		// 6021「queue.full.title」渠道级容量满载（2026-10-15 实案）：不是账号问题，
+		// 必须归 ErrUpstreamBusy（不罚号不轮转）——按 ErrSoftRate 逐号软冷却会在
+		// 秒级把整池健康号误杀。结构化 code 与固定文案双判据。
+		{429, `{"code":6021,"msg":"queue.full.title","requestId":"b1bc87ea3a771e835e388328713d47cf"}`, ErrUpstreamBusy},
+		{429, `{"error":{"data":{"code":6021,"msg":"queue.full.title"}}}`, ErrUpstreamBusy},
+		{429, `queue.full.title`, ErrUpstreamBusy},
+		{429, `{"code":6021,"msg":"queue full"}`, ErrUpstreamBusy},
+		// 文案外卡不绑 429（上游若换状态码仍须识别为渠道满载，不得落 hardMarkers 族）。
+		{500, `{"code":6021,"msg":"queue.full.title"}`, ErrUpstreamBusy},
+		// 防过宽：普通限流文案不带 queue.full，仍走软限流。
+		{429, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
+		{429, `{"requestId":"6021","msg":"rate limit"}`, ErrSoftRate},
+		// WAF 403（P0-1）：403 + 无业务信封（无 "code":/"msg": 字段）→ ErrWafBlock。
+		// 空体 / HTML 拦截页 / 纯文本 / 非信封 JSON 均命中。
+		{403, ``, ErrWafBlock},
+		{403, `<html><body>403 Forbidden</body></html>`, ErrWafBlock},
+		{403, `Forbidden`, ErrWafBlock},
+		{403, `{"message":"blocked by waf"}`, ErrWafBlock},
+		{403, `<head><script>...</script></head><body>blocked</body>`, ErrWafBlock},
+		// 403 带业务信封的仍走既有分类（P0-1 约束：不劫持业务 403）。
+		{403, `{"code":"11-128","msg":"blocked by security policy"}`, ErrContentBlocked},
+		{403, `{"code":60001,"msg":"quota exceeded"}`, ErrHardCredit},
+		{403, `{"code":1,"msg":"unknown business error"}`, ErrClient},
+		// 非 403 的无信封错误体不进 WAF 分类（WAF 判定绑定 403 形态）。
+		{400, `bad request`, ErrClient},
+		{429, ``, ErrSoftRate},
 	}
 	for _, c := range cases {
 		if got := Classify(c.status, c.body); got != c.want {
@@ -98,13 +177,13 @@ func TestParseSoftRateReset(t *testing.T) {
 		{"6004 带时间+UTC+8 后缀", `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, true},
 		{"6004 带时间无后缀", `{"code":6004,"msg":"将在 ` + ts + ` 重置"}`, true},
 		{"6004 无时间文案", `{"code":6004,"msg":"model usage limit exceeded"}`, false},
-		{"非 6004 但带时间（不是模型级）", `{"code":11140,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false},
+		{"非 6004 但带时间（ParseRateReset 统一解析；模型级豁免由调用侧按 6004 判定）", `{"code":11140,"msg":"将在 ` + ts + ` UTC+8 重置"}`, true},
 		{"非法时间格式", `{"code":6004,"msg":"将在 明天 重置"}`, false},
 		{"空 body", ``, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := ParseSoftRateReset(c.body)
+			got, ok := ParseRateReset(c.body)
 			if ok != c.ok {
 				t.Fatalf("ok=%v want %v (body=%s)", ok, c.ok, c.body)
 			}
@@ -219,7 +298,7 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		}, nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1", EnterpriseID: "e1"}
-	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "")
+	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "", ChatMeta{})
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -227,7 +306,7 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
@@ -243,6 +322,8 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 			return jsonResp(200, `{"code":0,"data":{"models":[
 				{"id":"glm-5.2","name":"GLM-5.2","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":["low","high"]}}
 			],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
+		case strings.HasSuffix(r.URL.Path, "/v3/config"):
+			return jsonResp(200, `{"code":0,"data":{"models":[]}}`), nil
 		default:
 			outbound, _ = io.ReadAll(r.Body)
 			return &http.Response{
@@ -268,7 +349,7 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 		t.Errorf("infos[0].DefaultEffort=%q want high", infos[0].DefaultEffort)
 	}
 	// glm-5.2 只支持 low/high，请求 max → 降级为 high
-	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "")
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -287,16 +368,17 @@ func TestChatStreamHardCreditError(t *testing.T) {
 		return jsonResp(402, `{"code":1,"msg":"余额不足"}`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	_, status, respBody, err := c.ChatStream(a, []byte(`{}`), "")
+	_, status, respBody, err := c.ChatStream(a, []byte(`{}`), "", ChatMeta{})
 	if status != 402 {
 		t.Errorf("status=%d", status)
 	}
-	if err != nil {
-		t.Fatalf("hard credit should return body via status, not err: %v", err)
+	// 错误信封一次成型：≥400 返回已分类的 *Error（Kind + body 全量仍经 respBody 透出）
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != ErrHardCredit {
+		t.Fatalf("hard credit should return classified *Error envelope, got %v", err)
 	}
-	// caller classifies via returned body
-	if Classify(status, string(respBody)) != ErrHardCredit {
-		t.Errorf("body=%q not classified hard credit", respBody)
+	if len(respBody) == 0 {
+		t.Errorf("body should still be returned for passthrough")
 	}
 }
 
@@ -326,7 +408,7 @@ func TestChatStreamReadsMultipleChunksOverRealTransport(t *testing.T) {
 	c.IdleTimeout = 5 * time.Second
 
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "")
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), "", ChatMeta{})
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -363,12 +445,15 @@ func TestUserResourceAggregation(t *testing.T) {
 		]}}}}`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	remain, err := c.UserResource(a)
+	remain, total, err := c.UserResource(a)
 	if err != nil {
 		t.Fatalf("resource: %v", err)
 	}
 	if remain != 1500 {
 		t.Errorf("remain=%d want 1500", remain)
+	}
+	if total != 3000 {
+		t.Errorf("total=%d want 3000", total)
 	}
 }
 
@@ -378,9 +463,12 @@ func TestUserResourceNegativeClamped(t *testing.T) {
 			{"PackageName":"p","CycleCapacitySize":100,"CycleCapacityRemain":-50,"CycleCapacityUsed":150}
 		]}}}}`), nil
 	})
-	remain, err := c.UserResource(&auth.Auth{AccessToken: "at"})
+	remain, total, err := c.UserResource(&auth.Auth{AccessToken: "at"})
 	if err != nil || remain != 0 {
 		t.Errorf("remain=%d err=%v, want 0 (clamped)", remain, err)
+	}
+	if total != 100 {
+		t.Errorf("total=%d want 100", total)
 	}
 }
 
@@ -426,8 +514,8 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if !ok {
 		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
 	}
-	if htr.ResponseHeaderTimeout != 120*time.Second {
-		t.Errorf("ResponseHeaderTimeout=%v want 120s", htr.ResponseHeaderTimeout)
+	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
+		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)
 	}
 }
 
@@ -447,7 +535,7 @@ func TestChatStreamRoutesToChatHTTP(t *testing.T) {
 		}, nil
 	})}
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	rc, status, _, err := c.ChatStream(a, []byte(`{}`), "")
+	rc, status, _, err := c.ChatStream(a, []byte(`{}`), "", ChatMeta{})
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -501,7 +589,107 @@ func TestFetchModelsDefaultEffortDualKeyAndSizes(t *testing.T) {
 	if g.MaxAllowedSize != 1000000 || g.MaxTokens != 48000 || g.Credits != "x0.79" {
 		t.Errorf("glm-5.3 sizes: maxAllowed=%d maxOut=%d credits=%q", g.MaxAllowedSize, g.MaxTokens, g.Credits)
 	}
+	if got := c.ModelRate("cn", "glm-5.3"); got != "0.79" {
+		t.Errorf("glm-5.3 ModelRate=%q want 0.79", got)
+	}
 	if au := byID["auto"]; au.DefaultEffort != "high" {
 		t.Errorf("auto DefaultEffort=%q want high (from legacy effort key)", au.DefaultEffort)
+	}
+}
+
+func TestModelRateCacheEffectiveAndNormalized(t *testing.T) {
+	c := New()
+	factor := 0.5
+	c.storeModelRates("cn", []ModelInfo{
+		{ID: "base", Credits: "x0.50 credits"},
+		{ID: "promo", Credits: "x0.80", PromoFactor: &factor, PromoCredits: "0.50x"},
+	})
+	if got := c.ModelRate("cn", "base"); got != "0.5" {
+		t.Fatalf("base rate=%q want 0.5", got)
+	}
+	if got := c.ModelRate("cn", "promo"); got != "0.5" {
+		t.Fatalf("promo rate=%q want 0.5", got)
+	}
+	if got := normalizeModelRate("x0.05 credits"); got != "0.05" {
+		t.Fatalf("normalizeModelRate=%q want 0.05", got)
+	}
+	c.storeModelRates("cn", []ModelInfo{{ID: "base", Credits: "x0.79"}})
+	if got := c.ModelRate("cn", "base"); got != "0.79" {
+		t.Fatalf("refreshed base rate=%q want 0.79", got)
+	}
+	if got := c.ModelRate("cn", "promo"); got != "" {
+		t.Fatalf("stale promo rate=%q want empty after full refresh", got)
+	}
+}
+
+func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
+	// CLI 目录给 flash 精简字段（128K / 固定 high）；IDE /v3/config 给完整能力。
+	var sawIDE bool
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
+			return jsonResp(200, `{"code":0,"data":{"models":[
+				{"id":"deepseek-v4.1-flash","name":"Deepseek-V4.1-Flash","maxInputTokens":1000000,"maxOutputTokens":128000,"credits":"x0.03 credits","supportsReasoning":true,"onlyReasoning":true,"reasoning":{"effort":"high","summary":"auto"}}
+			],"agents":[{"name":"cli","models":["deepseek-v4.1-flash"]}]}}`), nil
+		case strings.HasSuffix(r.URL.Path, "/v3/config"):
+			sawIDE = true
+			if r.Header.Get("User-Agent") != codeBuddyIDEUA {
+				t.Errorf("v3/config UA=%q want %s", r.Header.Get("User-Agent"), codeBuddyIDEUA)
+			}
+			if r.Header.Get("X-Product") != "SaaS" {
+				t.Errorf("X-Product=%q want SaaS", r.Header.Get("X-Product"))
+			}
+			if r.Header.Get("X-User-Id") != "u1" {
+				t.Errorf("X-User-Id=%q want u1", r.Header.Get("X-User-Id"))
+			}
+			return jsonResp(200, `{"code":0,"data":{"models":[
+				{"id":"deepseek-v4.1-flash","name":"Deepseek-V4.1-Flash","maxInputTokens":1000000,"maxOutputTokens":393216,"credits":"x0.03","supportsReasoning":true,"onlyReasoning":true,"reasoning":{"canDisableThinking":true,"defaultEffort":"high","summary":"auto","supportedEfforts":["low","high","max"]}}
+			]}}`), nil
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			return jsonResp(404, `{}`), nil
+		}
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1", Domain: "copilot.tencent.com"}
+	infos, err := c.FetchModels(a)
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if !sawIDE {
+		t.Fatal("expected /v3/config request")
+	}
+	if len(infos) != 1 {
+		t.Fatalf("infos=%+v", infos)
+	}
+	mi := infos[0]
+	if mi.MaxTokens != 393216 {
+		t.Errorf("MaxTokens=%d want 393216", mi.MaxTokens)
+	}
+	if mi.ContextWindow != 1000000 {
+		t.Errorf("ContextWindow=%d want 1000000", mi.ContextWindow)
+	}
+	if !mi.CanDisableThinking || !mi.SupportsReasoning {
+		t.Errorf("flags canDisable=%v supportsReasoning=%v", mi.CanDisableThinking, mi.SupportsReasoning)
+	}
+	if mi.DefaultEffort != "high" {
+		t.Errorf("DefaultEffort=%q want high", mi.DefaultEffort)
+	}
+	if got := strings.Join(mi.Efforts, ","); got != "low,high,max" {
+		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
+	}
+}
+
+// TestClassifyRealChannelRefusedBody 用上游**真实** 11-128 响应体（code 为字符串
+// "11-128"，带连字符，见 issue #197）钉住分流。护栏来历：PR #233 提交时字面量里的
+// 连字符丢失（实现与测试同写成 11-128），双方自洽所以测试全绿，但线上永远命中不了
+// 真实业务码——本用例用字节构造业务码，防止「实现和测试一起写错」再次通过。
+func TestClassifyRealChannelRefusedBody(t *testing.T) {
+	code := string([]rune{49, 49, 45, 49, 50, 56}) // "11-128"
+	body := `{"code":"` + code + `","msg":"request illegal","requestId":"b1bc87ea","displayTips":{"en":"This call failed channel verification."}}`
+	if got := Classify(400, body); got != ErrChannelRefused {
+		t.Fatalf("Classify(real 11-128)=%v want ErrChannelRefused", got)
+	}
+	if got := Classify(403, `{"code":"`+code+`","msg":"request illegal"}`); got != ErrChannelRefused {
+		t.Fatalf("Classify(real 11-128, 403)=%v want ErrChannelRefused", got)
 	}
 }

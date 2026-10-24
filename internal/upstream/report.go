@@ -10,6 +10,7 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -38,6 +39,62 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 	}
 	c.BillingHeaders(req, a)
 	return c.doJSON(req)
+}
+
+// billingMeterJSON 仅对 /billing/meter 族端点（get-user-resource / daily-checkin）
+// 按 realm 走双路径 fallback：global 先无 /v2 前缀，ErrNotFound 时二次换有 /v2 前缀
+// （上游新旧路径分叉）；cn 单路径（有 /v2）现状不变。仅 global realm 才有多路径。
+func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
+	var lastErr error
+	for i, path := range paths {
+		data, err := c.billingJSON(a, method, path, body)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		// 仅 404 换路径（路径不存在才值得 fallback）；其他错误直接返回。
+		var ue *Error
+		if !errors.As(err, &ue) || ue.Kind != ErrNotFound || i == len(paths)-1 {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。
+// 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s）。
+var billingRetryDelay = 2 * time.Second
+
+// isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
+// 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
+// code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
+// 已签到/参数错、4xx、限流）不重试——重试只会原样再失败一次。
+func isTransientBillingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *Error
+	if errors.As(err, &ue) {
+		return ue.Kind == ErrServer
+	}
+	return true
+}
+
+// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
+// 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。chat 热路径
+// 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
+func (c *Client) retryBillingTransient(fn func() error) error {
+	err := fn()
+	if err == nil || !isTransientBillingErr(err) {
+		return err
+	}
+	for i := 1; i <= 2; i++ {
+		time.Sleep(time.Duration(i) * billingRetryDelay)
+		if err = fn(); err == nil || !isTransientBillingErr(err) {
+			return err
+		}
+	}
+	return err
 }
 
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。

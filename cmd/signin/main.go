@@ -95,7 +95,7 @@ func main() {
 			}
 		}
 		// 顺手查余额
-		if remain, qerr := up.UserResource(a); qerr == nil {
+		if remain, _, qerr := up.UserResource(a); qerr == nil {
 			r.remain, r.hasQuota = remain, true
 		}
 		rows = append(rows, r)

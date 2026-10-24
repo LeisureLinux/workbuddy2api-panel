@@ -19,11 +19,11 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1", DeviceToken: "tok-from-auth"}
 	// 用 server 端验证而非 RoundTripper 捕获：更贴近真实注入路径。
 	for _, tc := range []struct {
-		name      string
-		apply     func(c *Client, req *http.Request)
-		wantPath  string
+		name     string
+		apply    func(c *Client, req *http.Request)
+		wantPath string
 	}{
-		{"chat", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "") }, "/v2/chat/completions"},
+		{"chat", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions"},
 		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 		// DeviceToken / DeviceTokenFile 皆空
 	}
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-	c.ChatHeaders(req, a, "")
+	c.ChatHeaders(req, a, "", ChatMeta{})
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -93,10 +93,10 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		auth    string
-		cfg     string
-		want    string
+		name string
+		auth string
+		cfg  string
+		want string
 	}{
 		{"auth_over_config", "tok-auth", "tok-config", "tok-auth"},
 		{"config_when_auth_empty", "", "tok-config", "tok-config"},
@@ -116,15 +116,15 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := &Client{
-				HTTP:           srv.Client(),
-				ChatHTTP:       srv.Client(),
-				ChatBaseCN:     srv.URL,
-				BillingBaseCN:  srv.URL,
-				DeviceToken:    tc.cfg,
+				HTTP:            srv.Client(),
+				ChatHTTP:        srv.Client(),
+				ChatBaseCN:      srv.URL,
+				BillingBaseCN:   srv.URL,
+				DeviceToken:     tc.cfg,
 				DeviceTokenFile: fp,
 			}
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-			c.ChatHeaders(req, a, "")
+			c.ChatHeaders(req, a, "", ChatMeta{})
 			resp, err := c.HTTP.Do(req)
 			if err != nil {
 				t.Fatalf("do: %v", err)

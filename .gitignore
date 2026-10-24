@@ -42,3 +42,6 @@ docs/
 
 # 本地验证工具（判据逆向过程脚本，结论沉淀于 data/desktop-task-protocol.md）
 /cmd/desktopverify*/
+*.zip
+server.exe
+.DS_Store
