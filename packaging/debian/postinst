@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+if ! getent passwd workbuddy2api >/dev/null 2>&1; then
+    useradd --system --no-create-home --user-group --shell /usr/sbin/nologin workbuddy2api || true
+fi
+
+install -d -o workbuddy2api -g workbuddy2api /etc/workbuddy2api
+install -d -o workbuddy2api -g workbuddy2api /var/lib/workbuddy2api/auths
+install -d -o workbuddy2api -g workbuddy2api /var/lib/workbuddy2api/data
+
+if [ ! -f /etc/workbuddy2api/config.json ]; then
+    if [ -f /usr/share/doc/workbuddy2api-panel/config.example.json ]; then
+        cp /usr/share/doc/workbuddy2api-panel/config.example.json /etc/workbuddy2api/config.json
+        if command -v sed >/dev/null 2>&1; then
+            sed -i 's#"auth_dir": "./auths"#"auth_dir": "/var/lib/workbuddy2api/auths"#' /etc/workbuddy2api/config.json
+            sed -i 's#"state_file": "./data/state.json"#"state_file": "/var/lib/workbuddy2api/data/state.json"#' /etc/workbuddy2api/config.json
+        fi
+        chown workbuddy2api:workbuddy2api /etc/workbuddy2api/config.json
+    fi
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable workbuddy2api.service >/dev/null 2>&1 || true
+    systemctl restart workbuddy2api.service >/dev/null 2>&1 || true
+fi
+
+exit 0

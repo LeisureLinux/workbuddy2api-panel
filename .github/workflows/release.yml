@@ -70,9 +70,13 @@ jobs:
           PKG="workbuddy2api-panel"
           ROOT="debroot"
           rm -rf "$ROOT"
-          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/share/man/man1" "$ROOT/usr/share/doc/$PKG"
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/share/man/man1" "$ROOT/usr/share/doc/$PKG" "$ROOT/lib/systemd/system"
           cp build/bin/* "$ROOT/usr/bin/"
           chmod 0755 "$ROOT/usr/bin/"*
+          cp packaging/systemd/workbuddy2api.service "$ROOT/lib/systemd/system/"
+          cp packaging/debian/postinst "$ROOT/DEBIAN/postinst"
+          cp packaging/debian/prerm "$ROOT/DEBIAN/prerm"
+          chmod 0755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm"
           gzip -9c man/wb2api.1 > "$ROOT/usr/share/man/man1/wb2api.1.gz"
           cp config.example.json "$ROOT/usr/share/doc/$PKG/config.example.json"
           cat > "$ROOT/DEBIAN/control" <<CTRL

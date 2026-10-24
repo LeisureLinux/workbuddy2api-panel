@@ -1,0 +1,17 @@
+[Unit]
+Description=WorkBuddy2API gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workbuddy2api
+Group=workbuddy2api
+WorkingDirectory=/var/lib/workbuddy2api
+Environment=HOME=/var/lib/workbuddy2api
+ExecStart=/usr/bin/wb2api -config /etc/workbuddy2api/config.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
