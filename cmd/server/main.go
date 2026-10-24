@@ -28,7 +28,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.2.0-panel"
+const appVersion = "1.2.1-panel"
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
@@ -180,6 +180,7 @@ func main() {
 		APIKey:               cfg.APIKey,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
+		WecomWebhook:         cfg.Notify.WecomWebhook,
 	})
 	pn := panel.New(panel.Config{
 		Pool:        p,
@@ -187,9 +188,10 @@ func main() {
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
+		RedisMode:     redisMode,
+		StickyCount:   sessCount,
+		Version:       appVersion,
+		WecomWebhook:  cfg.Notify.WecomWebhook,
 		Live:        live,
 		ConfigPath:  *cfgPath,
 		LoadConfig: func() (any, error) {
@@ -305,6 +307,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		APIKey:               newCfg.APIKey,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+		WecomWebhook:         newCfg.Notify.WecomWebhook,
 	})
 	up.SanitizeFingerprints = newCfg.Features.SanitizeBlacklistFingerprints
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)

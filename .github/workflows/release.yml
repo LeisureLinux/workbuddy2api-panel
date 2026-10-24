@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & package (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            goarch: amd64
+          - arch: arm64
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Determine version
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build static binaries
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p build/bin
+          for spec in "server:wb2api" "signin:signin" "login:login" "credit:credit"; do
+            IFS=: read -r dir out <<< "$spec"
+            echo "building $out (${{ matrix.goarch }})"
+            go build -trimpath -ldflags="-s -w" -o "build/bin/$out" "./cmd/$dir"
+          done
+          ls -lh build/bin
+
+      - name: Strip binaries
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            sudo apt-get update
+            sudo apt-get install -y binutils-aarch64-linux-gnu
+            for f in build/bin/*; do aarch64-linux-gnu-strip "$f"; done
+          else
+            for f in build/bin/*; do strip "$f"; done
+          fi
+          file build/bin/*
+
+      - name: Package .deb
+        run: |
+          PKG="workbuddy2api-panel"
+          ROOT="debroot"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/share/man/man1" "$ROOT/usr/share/doc/$PKG"
+          cp build/bin/* "$ROOT/usr/bin/"
+          chmod 0755 "$ROOT/usr/bin/"*
+          gzip -9c man/wb2api.1 > "$ROOT/usr/share/man/man1/wb2api.1.gz"
+          cp config.example.json "$ROOT/usr/share/doc/$PKG/config.example.json"
+          cat > "$ROOT/DEBIAN/control" <<CTRL
+          Package: $PKG
+          Version: $VERSION
+          Section: net
+          Priority: optional
+          Architecture: ${{ matrix.arch }}
+          Maintainer: LeisureLinux <leisurelinux@example.com>
+          Description: WorkBuddy (CodeBuddy) OpenAI-compatible multi-account gateway + web panel
+           Static single-binary gateway exposing /v1/chat/completions for multiple
+           WorkBuddy/CodeBuddy accounts, with a web management panel, account pool
+           rotation, cooldown/circuit breaker, sticky sessions and scheduled tasks.
+          CTRL
+          sed -i 's/^          //' "$ROOT/DEBIAN/control"
+          dpkg-deb --root-owner-group --build "$ROOT" "${PKG}_${VERSION}_${{ matrix.arch }}.deb"
+          ls -lh "${PKG}_${VERSION}_${{ matrix.arch }}.deb"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbuddy2api-panel-${{ matrix.arch }}
+          path: workbuddy2api-panel_${VERSION}_${{ matrix.arch }}.deb
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/*.deb \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

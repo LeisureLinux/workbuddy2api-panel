@@ -97,23 +97,22 @@ func doJSON(method, fullURL string, bearer string, body io.Reader) (json.RawMess
 	return env.Data, resp.StatusCode, nil
 }
 
-// loginStart 发起设备授权：POST auth/state 拿授权 URL。
-func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
+
+// beginLogin 发起设备授权并登记 state，返回 (state, authUrl)。
+// loginStart 与 accountRelogin 共用，避免重复实现。
+func (p *Panel) beginLogin() (string, string, error) {
 	data, status, err := doJSON(http.MethodPost, endpointAuthState, "", bytes.NewReader([]byte("{}")))
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
-		return
+		return "", "", fmt.Errorf("auth state (upstream %d): %v", status, err)
 	}
 	var st struct {
 		State   string `json:"state"`
 		AuthURL string `json:"authUrl"`
 	}
 	if err := json.Unmarshal(data, &st); err != nil || st.State == "" || st.AuthURL == "" {
-		writeErr(w, http.StatusBadGateway, "auth state: missing state or authUrl")
-		return
+		return "", "", fmt.Errorf("auth state: missing state or authUrl")
 	}
 	p.loginMu.Lock()
-	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
 	for s, created := range p.logins {
 		if time.Since(created) > loginTTL {
 			delete(p.logins, s)
@@ -122,7 +121,17 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	p.logins[st.State] = time.Now()
 	p.loginMu.Unlock()
 	log.Printf("panel: 发起 OAuth 添加账号（state=%s...）", st.State[:min(8, len(st.State))])
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State})
+	return st.State, st.AuthURL, nil
+}
+
+// loginStart 发起设备授权：POST auth/state 拿授权 URL。
+func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
+	state, authURL, err := p.beginLogin()
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": authURL, "state": state})
 }
 
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
@@ -222,5 +231,48 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"nickname":        acct.Nickname,
 		"credits":         remain,
 		"checkin_message": checkinMsg,
+	})
+}
+
+// accountRelogin 发起重新登录并把二维码推送到企业微信（若配置了 webhook）。
+// UI 入口："重登推送"按钮；也供运维直接 curl 调用。
+func (p *Panel) accountRelogin(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	st, ok := p.cfg.Pool.Status(uid)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	state, authURL, err := p.beginLogin()
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	nickname := st.Nickname
+	notified := false
+	var sendErr string
+	webhook := p.cfg.WecomWebhook
+	if p.cfg.Live != nil {
+		if w := p.cfg.Live.Load().WecomWebhook; w != "" {
+			webhook = w
+		}
+	}
+	if webhook != "" {
+		if err := sendWeComLoginQR(webhook, nickname, uid, authURL); err != nil {
+			sendErr = err.Error()
+			log.Printf("panel: relogin uid=%s wecom push failed: %v", uid, err)
+		} else {
+			notified = true
+		}
+	} else {
+		sendErr = "wecom webhook not configured (notify.wecom_webhook empty / live empty)"
+	}
+	log.Printf("panel: relogin uid=%s state=%s... notified=%v", uid, state[:min(8, len(state))], notified)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"state":    state,
+		"url":      authURL,
+		"notified": notified,
+		"message":  sendErr,
 	})
 }

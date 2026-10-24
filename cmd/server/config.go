@@ -100,6 +100,12 @@ type Config struct {
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
 	} `json:"features"`
 
+	Notify struct {
+		// WecomWebhook 企业微信机器人 webhook URL（空=禁用登录二维码推送）。
+		// 用于"重登推送"功能把 OAuth 登录链接/二维码发到企业微信，转发给账号持有人扫码。
+		WecomWebhook string `json:"wecom_webhook"`
+	} `json:"notify"`
+
 	Prompt struct {
 		// Mode custom（默认）= 网关用自有系统提示词替换客户端 system/developer；
 		// passthrough = 透传客户端原始 system（降级重试仍会切到 Degraded）。
@@ -334,7 +340,10 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
+		if v := os.Getenv("WB2A_WECOM_WEBHOOK"); v != "" {
+		c.Notify.WecomWebhook = v
 	}
+}
 }
 
 func (c *Config) normalize() error {

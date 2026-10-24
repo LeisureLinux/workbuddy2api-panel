@@ -18,6 +18,7 @@ type Snapshot struct {
 	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
+	WecomWebhook         string        // 企业微信机器人 webhook（空=禁用登录二维码推送）
 }
 
 // Holder 原子持有当前快照。

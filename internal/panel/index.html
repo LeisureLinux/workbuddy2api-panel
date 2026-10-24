@@ -585,6 +585,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
 
+        <div class="box">
+          <header><h3>通知（重登推送）</h3></header>
+          <div class="pad">
+            <label class="fld"><span class="lb">企业微信机器人 Webhook</span>
+              <input name="wecom_webhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+              <span class="hint">空 = 禁用登录二维码推送（重登时仅返回授权链接）；保存后立即生效</span></label>
+            <div class="hint" style="margin-top:10px">获取方式：企微群 → 添加机器人 → 复制 webhook 地址。保存后在账号列表「重登推送」按钮可把登录二维码发到企微。</div>
+          </div>
+        </div>
+
         <div class="savebar">
           <span class="grow"></span>
           <span class="restart-note" id="cfgNote"></span>
