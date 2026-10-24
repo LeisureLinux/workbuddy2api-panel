@@ -47,7 +47,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p build/bin
-          for spec in "server:wb2api" "signin:signin" "login:login" "credit:credit"; do
+          for spec in "server:wb2api" "signin:wb2api-signin" "login:wb2api-login" "credit:wb2api-credit"; do
             IFS=: read -r dir out <<< "$spec"
             echo "building $out (${{ matrix.goarch }})"
             go build -trimpath -ldflags="-s -w" -o "build/bin/$out" "./cmd/$dir"
