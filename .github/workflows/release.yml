@@ -70,10 +70,18 @@ jobs:
           PKG="workbuddy2api-panel"
           ROOT="debroot"
           rm -rf "$ROOT"
-          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/share/man/man1" "$ROOT/usr/share/doc/$PKG" "$ROOT/lib/systemd/system"
+          # unit 装到 /usr/lib/systemd/system（**不是** /etc/systemd/system）：
+          #   - /usr/lib/systemd/system = 发行版/软件包提供的 unit（vendor 区）；
+          #   - /etc/systemd/system = 本机管理员自定义/覆盖 unit（admin 区）。
+          # 打包方提供的 unit 属前者；放 /etc 会让本机一改 unit 就被包升级覆盖，
+          # 且 dpkg 升级时无法与「本机改过」的文件正常协商。
+          #   - 装 /usr/lib 而非 /lib：Debian 13 起 /lib 是 /usr/lib 的软链（合并 usr），
+          #     新包一律写 /usr/lib；dpkg 1.22 会把 /usr/lib 自动重定向记录为 /lib，
+          #     两种写法都能落到位，但 /usr/lib 是当前规范。
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/share/man/man1" "$ROOT/usr/share/doc/$PKG" "$ROOT/usr/lib/systemd/system"
           cp build/bin/* "$ROOT/usr/bin/"
           chmod 0755 "$ROOT/usr/bin/"*
-          cp packaging/systemd/workbuddy2api.service "$ROOT/lib/systemd/system/"
+          cp packaging/systemd/workbuddy2api.service "$ROOT/usr/lib/systemd/system/"
           cp packaging/debian/postinst "$ROOT/DEBIAN/postinst"
           cp packaging/debian/prerm "$ROOT/DEBIAN/prerm"
           chmod 0755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm"
@@ -100,8 +108,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # release 的 **body 由 go-binaries.yml 写**（它才是“五平台二进制”的产出方，
+          # 且写得最全）。本 workflow 只负责“建 release（若不存在）”与传 .deb：
+          #   - `gh release create` 不带 --generate-notes：它会写一份自动生成的
+          #     变更说明，与 go-binaries.yml 的 body 抢同一个字段（两个 workflow
+          #     并行跑，谁后结束谁赢 → 正文随机变成“自动生成说明”或“五平台二进制”）。
+          #     这里不写 body，等 go-binaries.yml 用 softprops 写。
+          #   - 若本 workflow 先建出 release，softprops 仍会**覆盖** body（它的
+          #     默认行为就是 update），所以先建后写是安全的。
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
-            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}"
 
       - name: Upload .deb to release
         if: startsWith(github.ref, 'refs/tags/v')

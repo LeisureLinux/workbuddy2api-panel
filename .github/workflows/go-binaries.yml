@@ -128,6 +128,16 @@ jobs:
           merge-multiple: true
       - name: checksums
         run: cd dist && sha256sum *.zip *.tar.gz > checksums.txt && ls -la
+      - name: 取源码版本号
+        id: ver
+        # publish job 与 build job 是两个独立 job，steps 不共享——必须自己取一遍
+        # （否则正文里的版本号会是空的）。
+        # 另：appVersion 带 -panel 后缀，而**文件名不带**（build job 打包时用
+        # V="${V%-panel}" 剥掉了）——正文里的文件名要跟实际产物一致，故两版都输出。
+        run: |
+          SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
+          echo "v=${SRC%-panel}" >> "$GITHUB_OUTPUT"   # 文件名口径：1.13.5
+          echo "vfull=$SRC" >> "$GITHUB_OUTPUT"        # 完整口径：1.13.5-panel
       - name: 上一版 tag（compare 链接用）
         id: prev
         run: |
@@ -138,7 +148,34 @@ jobs:
           name: ${{ github.ref_name }}-panel
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
-            CI 自动构建发布（五平台二进制 + checksums）。
+            CI 自动构建发布。
+
+            ## 产物清单
+
+            **五平台静态二进制**（`wb2api` 主程序 + `config.example.json` + `README.md`）：
+
+            | 文件 | 平台 |
+            |---|---|
+            | `wb2api-panel-v${{ steps.ver.outputs.v }}-linux-amd64.tar.gz` | Linux x86_64 |
+            | `wb2api-panel-v${{ steps.ver.outputs.v }}-linux-arm64.tar.gz` | Linux aarch64 |
+            | `wb2api-panel-v${{ steps.ver.outputs.v }}-darwin-amd64.tar.gz` | macOS Intel |
+            | `wb2api-panel-v${{ steps.ver.outputs.v }}-darwin-arm64.tar.gz` | macOS Apple Silicon |
+            | `wb2api-panel-v${{ steps.ver.outputs.v }}-windows-amd64.zip` | Windows x64 |
+
+            **两个架构的 `.deb` 包**（Debian / Ubuntu，含 **4 个** 可执行文件与 systemd unit）：
+
+            | 文件 | 架构 | 内含 |
+            |---|---|---|
+            | `workbuddy2api-panel_${{ steps.ver.outputs.v }}_amd64.deb` | amd64 | `wb2api` / `wb2api-signin` / `wb2api-login` / `wb2api-credit` |
+            | `workbuddy2api-panel_${{ steps.ver.outputs.v }}_arm64.deb` | arm64 | 同上 |
+
+            `.deb` 安装后会自动创建 `workbuddy2api` 系统用户、落默认配置到
+            `/etc/workbuddy2api/config.json`，并 enable + start `workbuddy2api.service`
+            （unit 装在 `/usr/lib/systemd/system/`，数据在 `/var/lib/workbuddy2api/`，
+            监听 `:7863`）。
+
+            另有 `checksums.txt`（`sha256sum -c checksums.txt` 可校验）与
+            GHCR 多架构镜像（`ghcr.io/linguo2625469/workbuddy2api-panel`）。
 
             完整变更：https://github.com/${{ github.repository }}/compare/${{ steps.prev.outputs.prev }}...${{ github.ref_name }}
           files: dist/*
