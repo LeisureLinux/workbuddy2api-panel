@@ -22,6 +22,34 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+// TestPanelPollInterval 面板自动刷新间隔：0 = 缺省、负数 = 关闭自动刷新。
+// normalize **不得**把负数回落成 0（那会把「关闭」变成「5 秒」）。
+func TestPanelPollInterval(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Panel.PollIntervalSec != 0 {
+		t.Fatalf("缺省 poll_interval_sec=%d want 0（= 前端缺省 5s）", c.Panel.PollIntervalSec)
+	}
+
+	off, err := ParseConfig([]byte(`{"panel":{"poll_interval_sec":-1}}`))
+	if err != nil {
+		t.Fatalf("parse off: %v", err)
+	}
+	if off.Panel.PollIntervalSec != -1 {
+		t.Fatalf("poll_interval_sec=%d want -1（关闭自动刷新，normalize 不得回落）", off.Panel.PollIntervalSec)
+	}
+
+	slow, err := ParseConfig([]byte(`{"panel":{"poll_interval_sec":60}}`))
+	if err != nil {
+		t.Fatalf("parse slow: %v", err)
+	}
+	if slow.Panel.PollIntervalSec != 60 {
+		t.Fatalf("poll_interval_sec=%d want 60", slow.Panel.PollIntervalSec)
+	}
+}
+
 func TestPanelPackageDetailLimit(t *testing.T) {
 	c := Default()
 	if err := c.normalize(); err != nil {

@@ -97,7 +97,7 @@ const sandbox = new Proxy({
   // 该文件不在本沙箱内执行，但保留此桩，将来把 mobile.js 纳入冒烟时可直接复用。
   MutationObserver: class { constructor() {} observe() {} disconnect() {} takeRecords() { return []; } },
   setInterval, clearInterval, setTimeout, clearTimeout,
-  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, WeakMap, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
 }, { get(t, k) { return t[k]; }, has() { return true; } });
 sandbox.window = sandbox; sandbox.globalThis = sandbox;
 vm.createContext(sandbox);

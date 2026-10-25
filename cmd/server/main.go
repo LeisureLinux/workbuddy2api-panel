@@ -307,6 +307,8 @@ func main() {
 		Version:       appVersion,
 		WecomWebhook:  cfg.Notify.WecomWebhook,
 		Live:        live,
+		// 面板自动刷新间隔（秒）：0 = 前端缺省；负值 = 关闭自动刷新。
+		PollIntervalSec: cfg.Panel.PollIntervalSec,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),

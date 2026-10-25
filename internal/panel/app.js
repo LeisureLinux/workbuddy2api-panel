@@ -72,6 +72,28 @@ function esc(s) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+/* setHTML：内容与上次相同时不碰 DOM（perf）。
+ *
+ * 面板每 5 秒重建一次整张表（innerHTML = ...）。即使内容没变，也会：
+ *  - 重新解析整段 HTML（构造大量临时节点），
+ *  - 丢弃旧子树（整批 GC 压力），
+ *  - 触发一次全表重排（LayoutCount / RecalcStyleCount 随之上涨）。
+ *
+ * 实测（账号池视图，10 个账号）：每 5 秒 DOM 节点数在 3278↔7088 之间震荡——
+ * 一次轮询就把整表换掉。数据没变时这纯属白烧 CPU 与内存。
+ *
+ * 做法：记住上次写入的 HTML 字符串，相同则跳过赋值（DOM 原样保留，滚动位置、
+ * 选中态、事件绑定的 DOM 节点都不会丢）。注意：不能改成 diff/patch——那会引入
+ * 「局部更新丢状态」的复杂度，而这里只要「完全相同就不动」即可覆盖绝大部分轮次。
+ */
+let lastHTML = new WeakMap();
+function setHTML(el, html) {
+  if (!el) return;
+  if (lastHTML.get(el) === html) return;
+  lastHTML.set(el, html);
+  el.innerHTML = html;
+}
 function ago(iso) {
   if (!iso || iso.startsWith('0001-')) return '—';
   const s = (Date.now() - new Date(iso)) / 1000;
@@ -367,7 +389,10 @@ function go(v) {
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
-  if (v === 'logs') loadLogs();
+  // 切到日志视图：本地窗口为空（首次）时全量拉一次；已有窗口则继续增量。
+  // 注意**不要**在每次切视图时 resetLogWindow()——那会把增量游标清掉，下一轮
+  // 又变成全量拉，白白丢掉增量带来的收益。
+  if (v === 'logs') { if (!logRows.length) resetLogWindow(); loadLogs(); }
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
@@ -391,12 +416,12 @@ setTimeout(() => {
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  setHTML(tb, list.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -472,7 +497,7 @@ function renderAccounts(list) {
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
-  }).join('');
+  }).join(''));
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -482,7 +507,7 @@ function renderModelLocks(rows) {
   if (!tb) return;
   const note = $('mlNote');
   if (!rows || !rows.length) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty">当前没有模型级限流 —— 所有模型均可选</div></td></tr>';
+    setHTML(tb, '<tr><td colspan="8"><div class="empty">当前没有模型级限流 —— 所有模型均可选</div></td></tr>');
     if (note) note.textContent = '';
     return;
   }
@@ -491,7 +516,7 @@ function renderModelLocks(rows) {
     const ms = parseAPITime(iso);
     return ms ? dur(Math.max(0, Math.round((ms - Date.now()) / 1000))) : '—';
   };
-  tb.innerHTML = rows.map(r => {
+  setHTML(tb, rows.map(r => {
     const st = STATE[r.state] || ['mute', r.state || '—'];
     const realm = r.realm === 'global' ? '国际版' : '国内版';
     return '<tr>' +
@@ -504,7 +529,7 @@ function renderModelLocks(rows) {
       '<td class="num">' + left(r.fully_unlock_at) + '</td>' +
       '<td>' + (r.reason ? '<div class="note">' + esc(r.reason) + '</div>' : '—') + '</td>' +
       '</tr>';
-  }).join('');
+  }).join(''));
   if (note) {
     const bad = rows.filter(r => r.state === 'locked' || r.state === 'starved').length;
     note.textContent = bad ? bad + ' 个模型整池不可用' : rows.length + ' 个模型部分限流';
@@ -515,6 +540,19 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
+    // 应用服务端透出的自动刷新间隔（首轮 overview 之后即生效；后续不变则不重建表）。
+    if (d.poll_interval_sec !== undefined && d.poll_interval_sec !== null) {
+      const sec = Number(d.poll_interval_sec);
+      if (Number.isFinite(sec)) {
+        const wantAuto = sec >= 0;
+        const wantMs = wantAuto ? (sec > 0 ? sec * 1000 : 5000) : pollIntervalMs;
+        if (wantAuto !== pollAutoRefresh || wantMs !== pollIntervalMs) {
+          pollAutoRefresh = wantAuto;
+          pollIntervalMs = wantMs;
+          startPolling();
+        }
+      }
+    }
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
@@ -873,6 +911,18 @@ $('btnModels').onclick = loadModels;
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';
+// 运行日志的增量拉取状态（perf）：logRows 是本地窗口，logSinceTs 是下次增量的起点。
+// 常态每 5 秒只传新增行，不再每轮重拉 500 行（~90KB）并重建整块 DOM。
+// LOG_ROWS_MAX 与服务端环形缓冲同量级（500）——本地窗口不必更大。
+let logRows = [];
+let logSinceTs = null;
+let logSince = '';
+const LOG_ROWS_MAX = 500;
+// 增量游标最长有效期：超过则改全量拉（服务端环形缓冲只有 500 行，久了会淘汰
+// 中间旧行，增量就拿不到「完整的一段」）。
+const LOG_CURSOR_MAX_AGE_MS = 5 * 60 * 1000;
+// resetLogWindow 丢弃本地窗口，下次改为全量拉（切视图/手动重载时用）。
+function resetLogWindow() { logRows = []; logSinceTs = null; logSince = ''; }
 $('logChips').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-ch]');
   if (!b) return;
@@ -889,30 +939,61 @@ async function loadLogs() {
   const rq = trangeQuery('reqRange', false);
   rq.set('limit', limit);
   try {
-    const [d, metrics, requestRows, credit] = await Promise.all([
-      api('logs'),
-      api('request_metrics').catch(() => ({})),
+    // 归档是否开启要先知道，否则无法决定 request_metrics 要不要带 recent。
+    // 先拉指标（recent=0，不带那 100 条事件），再用它决定请求记录表的数据源。
+    const metrics = await api('request_metrics?recent=0').catch(() => ({}));
+    const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
+    // 运行日志：常态只传**新增行**（?since=），不再每 5 秒重拉 500 行。
+    // logRows 是本地累积的窗口（上限 LOG_ROWS_MAX）；首次加载/手动重载时全量拉
+    // （since 置空），之后走增量。
+    //
+    // 例外：切走很久再回来时，服务端环形缓冲（500 行）可能已经把中间的旧行
+    // 淘汰掉了——增量只会拿到「还在环里」的那部分，中间缺一段。因此游标超过
+    // LOG_CURSOR_MAX_AGE_MS 就退回全量拉（一次 90KB，换来不缺行）。
+    if (logSinceTs && (Date.now() - logSinceTs.getTime()) > LOG_CURSOR_MAX_AGE_MS) {
+      resetLogWindow();
+    }
+    const lq = logSince ? '?since=' + encodeURIComponent(logSince) : '';
+    const [d, requestRows, credit] = await Promise.all([
+      api('logs' + lq),
       api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
       api('credit_history?limit=' + creditLimitValue()).catch(() => null),
     ]);
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
-    // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
-    const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
-    const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
+    // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求；
+    // 此时才需要 recent（第一次拉指标时已经知道归档关了，重新取一次带 recent 的）。
+    const recent = archiveOn
+      ? (requestRows.entries || [])
+      : ((await api('request_metrics').catch(() => ({}))).recent || []);
     renderRequestMetrics(metrics, recent);
-    const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
-    box.innerHTML = entries.length
+    // 增量合并到本地窗口（增量拉到的行 append；全量拉到的行 replace）。
+    const incoming = d.entries || [];
+    if (logSince) {
+      logRows = logRows.concat(incoming);
+      if (logRows.length > LOG_ROWS_MAX) logRows = logRows.slice(-LOG_ROWS_MAX);
+    } else {
+      logRows = incoming.slice(-LOG_ROWS_MAX);
+    }
+    // 下次增量的起点：本次收到的最后一条的时间戳（同毫秒的多条会被一起带上，
+    // 重复无害——服务端按 After(since) 过滤，同毫秒条目可能重复一次；用
+    // 「已见过的最大 ts」而不是「现在」是对的：不能漏）。
+    for (const e of incoming) {
+      if (e && e.ts && (!logSinceTs || new Date(e.ts) > logSinceTs)) logSinceTs = new Date(e.ts);
+    }
+    logSince = logSinceTs ? logSinceTs.toISOString() : '';
+    const entries = logRows.filter(e => logCh === 'all' || e.ch === logCh);
+    setHTML(box, entries.length
       ? entries.map(e => {
         const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
         const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
         const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
         return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
       }).join('')
-      : '<span style="color:var(--ink-3)">暂无日志</span>';
+      : '<span style="color:var(--ink-3)">暂无日志</span>');
     if (logPin && atEnd) box.scrollTop = box.scrollHeight;
     const counts = {};
-    for (const e of (d.entries || [])) counts[e.ch] = (counts[e.ch] || 0) + 1;
+    for (const e of logRows) counts[e.ch] = (counts[e.ch] || 0) + 1;
     $('logNote').textContent = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
@@ -989,7 +1070,7 @@ function renderCreditHistory(d) {
   }
   const entries = d.entries || [];
   if (note) note.textContent = creditHistoryNote(entries);
-  body.innerHTML = entries.length
+  setHTML(body, entries.length
     ? entries.map(e => '<tr>' +
       '<td>' + esc(creditTimeText(e)) + '</td>' +
       '<td>' + esc(creditAccountText(e)) + '</td>' +
@@ -997,7 +1078,7 @@ function renderCreditHistory(d) {
       '<td class="num">' + esc(creditBalanceText(e)) + '</td>' +
       '<td>' + esc(creditDescText(e)) + '</td>' +
       '</tr>').join('')
-    : '<tr><td colspan="5" style="color:var(--ink-3)">暂无积分变动记录</td></tr>';
+    : '<tr><td colspan="5" style="color:var(--ink-3)">暂无积分变动记录</td></tr>');
 }
 function creditLimitValue() {
   const el = $('creditLimit');
@@ -1052,7 +1133,7 @@ function renderRequestTable() {
   const list = reqEntries.filter(e => reqMatch(e));
   const tb = $('reqBody');
   if (!tb) return;
-  tb.innerHTML = list.map(e => {
+  setHTML(tb, list.map(e => {
     const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
     const ip = e && e.client_ip ? e.client_ip : '';
     const ua = e && e.user_agent ? e.user_agent : '';
@@ -1070,7 +1151,7 @@ function renderRequestTable() {
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
   }).join('') || '<tr><td colspan="10" class="empty">' +
-      (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
+      (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>');
 
   const filtered = list.length !== reqEntries.length;
   // 归档里的旧条目没有来源字段（该功能上线前写入）：这时提示开关/历史原因，
@@ -1095,7 +1176,7 @@ if ($('reqOutcome')) $('reqOutcome').onchange = () => {
   renderRequestTable();
 };
 if ($('reqLimit')) $('reqLimit').onchange = loadLogs;
-if ($('btnReqReload')) $('btnReqReload').onclick = loadLogs;
+if ($('btnReqReload')) $('btnReqReload').onclick = () => { resetLogWindow(); loadLogs(); };
 // 时间范围：默认「全部历史」——请求记录页的历史行为就是"取最近 N 条"，
 // 加一个默认收窄的区间会让打开页面时看到的条数凭空变少。
 if ($('reqRange')) trangeBind('reqRange', loadLogs, '0');
@@ -1154,6 +1235,7 @@ const CFG_MAP = {
   international_account_order: ['pool', 'account_order', 'international'],
   listen: ['listen'], api_key: ['api_key'],
   package_detail_limit: ['panel', 'package_detail_limit'],
+  poll_interval_sec: ['panel', 'poll_interval_sec'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -1576,16 +1658,50 @@ if ($('btnCompClaimAll')) $('btnCompClaimAll').onclick = async () => {
 };
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
+// 页面隐藏时暂停轮询（perf）：浏览器把标签页切到后台时，本页仍然每 5 秒打一轮
+// 接口 + 重建整张表——用户看不到，却照付网络、CPU 与内存代价。visibilitychange
+// 事件在切后台/回前台时触发，这里据此停表与补一次刷新（回前台时数据是旧的，
+// 立即补拉一次比空等一个周期更快）。
+//
+// 代价：无人看时面板数据不更新。这与「自动刷新」的本意不冲突——自动刷新是给
+// 「盯着看」的人用的；真需要无人值守的数据，看服务端 /status 与排程日志。
+let pageHidden = document.visibilityState === 'hidden';
+// pollIntervalMs 自动刷新间隔：缺省 5000ms。服务端 /panel/api/overview 会透出
+// config 的 panel.poll_interval_sec（0 = 缺省，负数 = 关闭自动刷新）——首轮
+// overview 回来后据此重建定时器。账号多或只把面板当监控用时，调大间隔能显著
+// 降低浏览器与服务端负担。
+let pollIntervalMs = 5000;
+let pollAutoRefresh = true;
+document.addEventListener('visibilitychange', () => {
+  const nowHidden = document.visibilityState === 'hidden';
+  if (nowHidden === pageHidden) return;
+  pageHidden = nowHidden;
+  if (pageHidden) {
+    if (refTimer) { clearInterval(refTimer); refTimer = null; }
+    return;
+  }
+  // 回前台：立刻补拉一次当前视图（不等下一个 tick）。
+  refreshVisible();
+  startPolling();
+});
+
 function refreshVisible() {
+  if (pageHidden) return;   // 后台不刷（见上）
   if (view === 'accounts') { loadOverview(true); renderCachedCompensation(); }
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }
+// startPolling（重）建轮询定时器。间隔取 pollIntervalMs（服务端配置可调）；
+// pollAutoRefresh=false（配置为负）时不开表——只在用户手动操作时更新。
+function startPolling() {
+  if (refTimer) { clearInterval(refTimer); refTimer = null; }
+  if (pageHidden || !pollAutoRefresh) return;
+  refTimer = setInterval(refreshVisible, pollIntervalMs);
+}
 function start() {
   loadOverview(true);
   loadCompensation();                       // 补偿状态：首次进页面查一次（之后靠新鲜窗口）
-  if (refTimer) clearInterval(refTimer);
-  refTimer = setInterval(refreshVisible, 5000);
+  startPolling();
   checkAuthGate();
 }
 async function checkAuthGate() {

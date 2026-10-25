@@ -29,6 +29,10 @@ type Config struct {
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// PollIntervalSec 面板自动刷新间隔（秒）。0 = 用前端缺省（5s）；
+		// 负值 = 关闭自动刷新（只在手动操作时更新）。账号多、或只是开着面板
+		// 当监控用时，调大间隔能显著降低浏览器与服务端负担。
+		PollIntervalSec int `json:"poll_interval_sec"`
 	} `json:"panel"`
 
 	Logging struct {
@@ -510,6 +514,8 @@ func (c *Config) normalize() error {
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}
+	// PollIntervalSec 不做回落：0 = 缺省（前端 5s），负数 = 关闭自动刷新。
+	// 两者都是合法取值，normalize 必须原样保留（回落会把「关闭」变成「5 秒」）。
 	if c.Logging.RequestRetentionDays <= 0 {
 		c.Logging.RequestRetentionDays = 7
 	}
